@@ -16,6 +16,25 @@ if (!require("BiocManager", quietly = TRUE))
 BiocManager::install("Gviz")
 
 
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("normr")
+
+
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("MotifDb")
+
+
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("TFBSTools")
+
+
+
 library(GenomeInfoDb)
 library(GenomicRanges)
 library(GenomicAlignments)
@@ -25,12 +44,15 @@ library(rtracklayer)
 library(Gviz)
 library(ggplot2)
 library(GenomeInfoDb)
-library(GenomicRanges)
 library(BSgenome.Hsapiens.UCSC.hg38)
 library(tidyr)
 library(AnnotationHub)
 library(dplyr)
-
+library(rtracklayer)
+library(GenomicFeatures)
+library(normr)
+library(MotifDb)
+library(TFBSTools)
 
 data_path = system.file('extdata/chip-seq',package='compGenomRData')
 chip_files = list.files(data_path, full.names=TRUE)
@@ -479,5 +501,691 @@ ggplot(data = annot_reads_df,
     ylab('Percentage of reads') +
     ggtitle('Percentage of reads in annotation')
 
+
+#Peak calling
+
+
+
+
+# set names for chip-seq bigWig files
+chip_files = list(
+    H3K4me3  = 'GM12878_hg38_H3K4me3.chr21.bw',
+
+    H3K36me3 = 'GM12878_hg38_H3K36me3.chr21.bw',
+
+    POL2     = 'GM12878_hg38_POLR2A.chr21.bw'
+)
+# get full paths to the files
+chip_files = lapply(chip_files, function(x){
+    file.path(data_path, x)
+})
+
+
+
+
+# load rtracklayer
+library(rtracklayer)
+
+# import the ChIP bigWig files
+chip_profiles = lapply(chip_files, rtracklayer::import.bw)
+
+
+library(AnnotationHub)
+hub = AnnotationHub()
+gtf = hub[['AH61126']]
+
+# select only chromosome 21
+seqlevels(gtf, pruning.mode='coarse') = '21'
+
+# extract chromosome names
+ensembl_seqlevels = seqlevels(gtf)
+
+# paste the chr prefix to the chromosome names
+ucsc_seqlevels    = paste0('chr', ensembl_seqlevels)
+
+# replace ensembl with ucsc chromosome names
+seqlevels(gtf, pruning.mode='coarse') = ucsc_seqlevels
+
+
+
+
+# load the GenomicFeatures object
+library(GenomicFeatures)
+
+# convert the gtf annotation into a data.base
+txdb         = makeTxDbFromGRanges(gtf)
+
+
+# define the gene track object
+gene_track  = GeneRegionTrack(txdb, chr='chr21', genome='hg38')
+
+
+
+# load Gviz package
+library(Gviz)
+# fetches the chromosome length information
+hg_chrs = getChromInfoFromUCSC('hg38')
+hg_chrs = subset(hg_chrs, (grepl('chr21$',chrom)))
+
+# convert data.frame to named vector
+seqlengths = with(hg_chrs, setNames(size, chrom))
+
+# constructs the ideogram track
+chr_track   = IdeogramTrack(
+    chromosome = 'chr21', 
+    genome     = 'hg38'
+)
+
+# constructs the coordinate system
+axis = GenomeAxisTrack(
+    range = GRanges('chr21', IRanges(1, width=seqlengths))
+)
+
+
+# use a lapply on the imported bw files to create the track objects
+# we loop over experiment names, and select the corresponding object
+# within the function
+data_tracks = lapply(names(chip_profiles), function(exp_name){
+    
+    # chip_profiles[[exp_name]] - selects the 
+    # proper experiment using the exp_name
+    DataTrack(
+        range = chip_profiles[[exp_name]],   
+        name  = exp_name,  
+        
+        # type of the track
+        type  = 'h', 
+        
+        # line width parameter
+        lwd   = 5
+    )
+})
+
+
+
+# select the start coordinate for the URB1 gene
+start = min(start(subset(gtf, gene_name == 'URB1')))
+
+# select the end coordinate for the URB1 gene
+end   = max(end(subset(gtf, gene_name == 'URB1')))
+
+# plot the signal profiles around the URB1 gene
+plotTracks(
+    trackList = c(chr_track, axis, gene_track, data_tracks),
+    
+    # relative track sizes
+    sizes     = c(1,1,1,1,1,1), 
+    
+    # background color
+    background.title     = "black",
+    
+    # controls visualization of gene sets
+    collapseTranscripts  = "longest", 
+    transcriptAnnotation = "symbol",
+    
+    # coordinates to visualize 
+    from = start - 5000,
+    to   = end   + 5000
+)
+
+
+# full path to the ChIP data file
+chip_file    = file.path(data_path, 'GM12878_hg38_CTCF_r1.chr21.bam')
+
+# full path to the Control data file
+control_file = file.path(data_path, 'GM12878_hg38_Input_r5.chr21.bam')
+
+
+# as previously done, we calculate the cpm for each experiment
+library(GenomicRanges)
+library(GenomicAlignments)
+
+# select the chromosome
+hg_chrs = getChromInfoFromUCSC('hg38') 
+hg_chrs = subset(hg_chrs, grepl('chr21$',chrom))
+
+seqlengths = with(hg_chrs, setNames(size, chrom))
+
+# define the windows
+tilling_window = unlist(tileGenome(seqlengths, tilewidth=1000))
+
+# count the reads
+counts         = summarizeOverlaps(
+    features = tilling_window, 
+    reads    = c(chip_file, control_file)
+)
+
+# normalize read counts
+counts         = assays(counts)[[1]]
+cpm = t(t(counts)*(1000000/colSums(counts)))
+
+
+library(ggplot2)
+# convert the matrix into a data.frame for ggplot
+cpm = data.frame(cpm)
+ggplot(
+    data = cpm, 
+    aes(
+        x = GM12878_hg38_Input_r5.chr21.bam, 
+        y = GM12878_hg38_CTCF_r1.chr21.bam)
+    ) +
+    geom_point() +
+    geom_abline(slope = 1) +
+    theme_bw() +
+    theme_bw() +
+    scale_fill_brewer(palette='Set2') +
+    theme(
+        axis.text   = element_text(size=10, face='bold'),
+        axis.title  = element_text(size=14,face="bold"),
+        plot.title  = element_text(hjust = 0.5),
+        axis.text.x = element_text(angle = 90, hjust = 1)) +
+    xlab('Input CPM') +
+    ylab('CTCF CPM') +
+    ggtitle('ChIP versus Input')
+
+
+
+library(normr)
+# peak calling using chip and control
+ctcf_fit = enrichR(
+    
+            # ChIP file
+            treatment = chip_file,
+            
+            # control file
+            control   = control_file,
+            
+            # genome version
+            genome    = "hg38",
+            
+            # print intermediary steps during the analysis
+            verbose   = FALSE)
+
+
+summary(ctcf_fit)
+
+
+# extracts the ranges
+ctcf_peaks = getRanges(ctcf_fit)
+    
+# annotates the ranges with the supporting p value
+ctcf_peaks$qvalue     = getQvalues(ctcf_fit)
+    
+# annotates the ranges with the calculated enrichment
+ctcf_peaks$enrichment = getEnrichment(ctcf_fit)
+    
+# selects the ranges which correspond to the enriched class
+ctcf_peaks = subset(ctcf_peaks, !is.na(component))
+    
+# filter by a stringent q value threshold
+ctcf_peaks = subset(ctcf_peaks, qvalue < 0.01)
+    
+# order the peaks based on the q value
+ctcf_peaks = ctcf_peaks[order(ctcf_peaks$qvalue)]
+
+
+seqlevels(ctcf_peaks, pruning.mode='coarse') = 'chr21'
+
+
+# write the peaks loacations into a txt table
+write.table(ctcf_peaks, file.path(data_path, 'CTCF_peaks.txt'), 
+            row.names=F, col.names=T, quote=F, sep='\t')
+
+
+# find enriched tilling windows
+enriched_regions = countOverlaps(tilling_window, ctcf_peaks) > 0
+
+
+library(ggplot2)
+cpm$enriched_regions = enriched_regions 
+
+ggplot(
+    data = cpm, 
+    aes(
+        x = GM12878_hg38_Input_r5.chr21.bam, 
+        y = GM12878_hg38_CTCF_r1.chr21.bam, 
+        color = enriched_regions
+    )) +
+  geom_point() +
+  geom_abline(slope = 1) +
+  theme_bw() +
+  scale_fill_brewer(palette='Set2') +
+  theme(
+    axis.text   = element_text(size=10, face='bold'),
+    axis.title  = element_text(size=14,face="bold"),
+    plot.title  = element_text(hjust = 0.5),
+    axis.text.x = element_text(angle = 90, hjust = 1)) +
+  xlab('Input CPM') +
+  ylab('CTCF CPM') +
+  ggtitle('ChIP versus Input') +
+  scale_color_manual(values=c('gray','red'))
+
+
+# calculate the coverage for one bam file
+calculateCoverage = function(
+  bam_file,
+  extend = 200
+){
+  
+  # load reads into R
+  reads = readGAlignments(bam_file)
+  
+  # convert reads into a GRanges object
+  reads = granges(reads)
+  
+  # resize the reads to 200bp
+  reads = resize(reads, width=extend, fix='start')
+  
+  # get the coverage vector
+  cov   = coverage(reads)
+  
+  # normalize the coverage vector to the sequencing depth
+  cov = round(cov * (1000000/length(reads)),2)
+  
+  # convert the coverage go a GRanges object
+  cov   = as(cov, 'GRanges')
+  
+  # keep only chromosome 21
+  seqlevels(cov, pruning.mode='coarse') = 'chr21'
+  return(cov)
+}
+
+
+# calculate coverage for the ChIP file
+ctcf_cov = calculateCoverage(chip_file)
+
+# calculate coverage for the control file
+cont_cov = calculateCoverage(control_file)
+
+
+
+# load Gviz and get the chromosome coordinates
+library(Gviz)
+chr_track  = IdeogramTrack('chr21', 'hg38')
+axis       = GenomeAxisTrack(
+    range = GRanges('chr21', IRanges(1, width=seqlengths))
+)
+
+
+# peaks track
+peaks_track = AnnotationTrack(ctcf_peaks, name = "CTCF Peaks")
+
+
+chip_track  = DataTrack(
+    range = ctcf_cov,   
+    name  = "CTCF",  
+    type  = 'h', 
+    lwd   = 3
+)
+
+cont_track  = DataTrack(
+    range = cont_cov,   
+    name  = "Input", 
+    type  = 'h', 
+    lwd=3
+)
+
+plotTracks(
+    trackList = list(chr_track, axis, peaks_track, chip_track, cont_track), 
+    sizes     = c(.2,.5,.5,1,1), 
+    background.title = "black",
+    from = start(ctcf_peaks)[1] - 1000,
+    to   = end(ctcf_peaks)[1]   + 1000
+)
+
+
+
+# fetch the ChIP-file for H3K36me3
+chip_file    = file.path(data_path, 'GM12878_hg38_H3K36me3.chr21.bam')
+
+# fetch the corresponding input file
+control_file = file.path(data_path, 'GM12878_hg38_Input_r5.chr21.bam')
+
+
+library(normr)
+# define the window width for the counting
+countConfiguration = countConfigSingleEnd(binsize = 5000)
+
+
+# find broad peaks using enrichR
+h3k36_fit = enrichR(
+            
+            # ChIP file
+            treatment   = chip_file,
+            
+            # control file
+            control     = control_file,
+            
+            # genome version
+            genome      = "hg38",
+            verbose     = FALSE,
+            
+            # window size for counting
+            countConfig = countConfiguration)
+
+
+summary(h3k36_fit)
+
+
+# get the locations of broad peaks
+h3k36_peaks            = getRanges(h3k36_fit)
+
+# extract the qvalue and enrichment
+h3k36_peaks$qvalue     = getQvalues(h3k36_fit)
+h3k36_peaks$enrichment = getEnrichment(h3k36_fit)
+
+# select proper peaks
+h3k36_peaks = subset(h3k36_peaks, !is.na(component))
+h3k36_peaks = subset(h3k36_peaks, qvalue < 0.01)
+h3k36_peaks = h3k36_peaks[order(h3k36_peaks$qvalue)]
+
+# collapse nearby enriched regions
+h3k36_peaks = reduce(h3k36_peaks)
+
+
+# construct the data tracks for the H3K36me3 and Input files
+h3k36_cov = calculateCoverage(chip_file)
+data_tracks = list(
+    h3k36 = DataTrack(h3k36_cov,  name = 'h3k36_cov',  type='h', lwd=3),
+    input = DataTrack(cont_cov,   name = 'Input',      type='h', lwd=3)
+)
+
+
+# define the window for the visualization
+start = min(start(h3k36_peaks[2])) - 25000
+end   = max(end(h3k36_peaks[2])) + 25000
+
+# create the peak track
+peak_track = AnnotationTrack(reduce(h3k36_peaks), name='H3K36me3')
+
+# plots the enriched region
+plotTracks(
+    trackList = c(chr_track, axis, gene_track, peak_track, data_tracks),
+    sizes     = c(.5,.5,.5,.1,1,1), 
+    background.title     = "black",
+    collapseTranscripts  = "longest", 
+    transcriptAnnotation = "symbol",
+    from = start,
+    to   = end
+)
+
+
+# extract, per tilling window, counts from the fit object
+h3k36_counts = data.frame(getCounts(h3k36_fit))
+    
+# change the column names of the data.frame
+colnames(h3k36_counts) = c('Input','H3K36me3')
+    
+# extract the q-value corresponding to each bin
+h3k36_counts$qvalue = getQvalues(h3k36_fit)
+    
+# define which regions are peaks using a q value cutoff
+h3k36_counts$enriched[is.na(h3k36_counts$qvalue)]  = 'Not Peak'
+h3k36_counts$enriched[h3k36_counts$qvalue > 0.05]  = 'Not Peak'
+h3k36_counts$enriched[h3k36_counts$qvalue <= 0.05] = 'Peak'
+    
+# remove the q value column
+h3k36_counts$qvalue = NULL 
+    
+# reshape the data.frame into a long format
+h3k36_counts_df = tidyr::pivot_longer(
+    data      = h3k36_counts, 
+    cols      = -enriched,
+    names_to  = 'experiment',
+    values_to = 'counts'
+)
+    
+# sum the number of reads in the Peak and Not Peak regions
+h3k36_counts_df = group_by(.data = h3k36_counts_df, experiment, enriched)
+h3k36_counts_df = summarize(.data = h3k36_counts_df, num_of_reads = sum(counts))
+    
+# calculate the percentage of reads.
+h3k36_counts_df       = group_by(.data = h3k36_counts_df, experiment)
+h3k36_counts_df       = mutate(.data = h3k36_counts_df, total=sum(num_of_reads))
+h3k36_counts_df$percentage = with(h3k36_counts_df, round(num_of_reads/total,2))
+
+
+ggplot(
+    data = h3k36_counts_df, 
+    aes(
+        x = experiment, 
+        y = percentage, 
+        fill = enriched
+    )) +
+    geom_bar(stat='identity', position='dodge') +
+    theme_bw() +
+    theme(
+        axis.text = element_text(size=10, face='bold'),
+        axis.title = element_text(size=12,face="bold"),
+        plot.title = element_text(hjust = 0.5)) +
+    xlab('Experiment') +
+    ylab('Percetage of reads in region') +
+    ggtitle('Percentage of reads in peaks for H3K36me3') +
+    scale_fill_manual(values=c('gray','red'))
+
+
+# load the MotifDB package
+library(MotifDb)
+
+# fetch the CTCF motif from the data base
+motifs = query(query(MotifDb, 'Hsapiens'), 'CTCF')
+
+# show all available ctcf motifs
+motifs
+
+
+
+# based on the MotifDB version, the location of the CTCF motif
+# might change, if you do not get the expected results please try
+# to subset with different indices
+ctcf_motif  = motifs[[1]]
+
+
+
+# extend the peak regions
+ctcf_peaks_resized = resize(ctcf_peaks, width = 400, fix = 'center')
+
+
+# load the human genome sequence
+library(BSgenome.Hsapiens.UCSC.hg38)
+
+# extract the sequences around the peaks
+seq = getSeq(BSgenome.Hsapiens.UCSC.hg38, ctcf_peaks_resized)
+
+
+
+# load the TFBS tools package
+library(TFBSTools)
+
+# convert the matrix into a PWM object
+ctcf_pwm = PWMatrix(
+    ID = 'CTCF', 
+    profileMatrix = ctcf_motif
+)
+
+
+# label which peaks contain CTCF motifs
+motif_hits_df = data.frame(
+  peak_order     = 1:length(ctcf_peaks)
+)
+motif_hits_df$contains_motif = motif_hits_df$peak_order %in% hits$seqnames
+motif_hits_df = motif_hits_df[order(-motif_hits_df$peak_order),]
+
+# calculate the percentage of peaks with motif for peaks of descending strength
+motif_hits_df$perc_peaks = with(motif_hits_df, 
+                                cumsum(contains_motif) / max(peak_order))
+motif_hits_df$perc_peaks = round(motif_hits_df$perc_peaks, 2)
+
+
+
+# plot the cumulative distribution of motif hit percentages
+ggplot(
+    motif_hits_df, 
+    aes(
+        x = peak_order, 
+        y = perc_peaks
+    )) +
+  geom_line(size=2) +
+  theme_bw() +
+  theme(
+    axis.text = element_text(size=10, face='bold'),
+    axis.title = element_text(size=14,face="bold"),
+    plot.title = element_text(hjust = 0.5)) +
+  xlab('Peak rank') +
+  ylab('Percetage of peaks with motif') +
+  ggtitle('Percentage of CTCF peaks with the CTCF motif')
+
+
+# resize the region around peaks to +/- 1kb
+ctcf_peaks_resized = resize(ctcf_peaks, width = 2000, fix='center')
+
+
+# fetch the sequence
+seq = getSeq(BSgenome.Hsapiens.UCSC.hg38,ctcf_peaks_resized)
+
+# convert the motif matrix to PWM, and scan the peaks
+ctcf_pwm    = PWMatrix(ID = 'CTCF', profileMatrix = ctcf_motif)
+hits = searchSeq(ctcf_pwm, seq, min.score="80%", strand="*")
+hits = as.data.frame(hits)
+
+
+# set the position relative to the start
+hits$position = hits$start - 1000 
+
+# plot the motif hits around peaks
+ggplot(data=hits, aes(position)) +
+  geom_density(size=2) +
+  theme_bw() +
+  geom_vline(xintercept = 0, linetype=2, color='red', size=2) +
+  xlab('Position around the CTCF peaks') +
+  ylab('Per position percentage\nof motif occurence') +
+  theme(
+    axis.text = element_text(size=10, face='bold'),
+    axis.title = element_text(size=14,face="bold"),
+    plot.title = element_text(hjust = 0.5))
+
+# download the annotation
+hub = AnnotationHub()
+gtf = hub[['AH61126']]
+seqlevels(gtf, pruning.mode='coarse') = '21'
+seqlevels(gtf, pruning.mode='coarse') = paste0('chr', seqlevels(gtf))
+
+# create the annotation hierarchy
+annotation_list = GRangesList(
+  tss    = promoters(subset(gtf, type=='gene'), 1000, 1000),
+  exon   = subset(gtf, type=='exon'),
+  intron = subset(gtf, type=='gene')
+)
+
+
+
+# function which annotates the location of each peak
+annotatePeaks = function(peaks, annotation_list, name){
+  
+  # ------------------------------------------------ #
+  # 1. getting disjoint regions
+  # collapse touching enriched regions
+  peaks = reduce(peaks)
+  
+  # ------------------------------------------------ #
+  # 2. overlapping peaks and annotation
+  # find overlaps between the peaks and annotation_list
+  result = as.data.frame(findOverlaps(peaks, annotation_list))
+  
+  # ------------------------------------------------ #
+  # 3. annotating peaks
+  # fetch annotation names
+  result$annotation = names(annotation_list)[result$subjectHits]
+  
+  # rank by annotation precedence
+  result = result[order(result$subjectHits),]    
+  
+  # remove overlapping annotations
+  result = subset(result, !duplicated(queryHits))
+  
+  # ------------------------------------------------ #
+  # 4. calculating statistics
+  # count the number of peaks in each annotation category
+  result = group_by(.data = result, annotation)
+  result = summarise(.data = result, counts = length(annotation))
+  
+  # fetch the number of intergenic peaks
+  result = rbind(result, 
+                 data.frame(annotation = 'intergenic', 
+                            counts     = length(peaks) - sum(result$counts)))
+  
+  result$frequency  = with(result, round(counts/sum(counts),2))
+  result$experiment = name
+  
+  return(result)
+}
+
+
+peak_list = list(
+    CTCF     = ctcf_peaks, 
+    H3K36me3 = h3k36_peaks
+)
+
+
+
+# calculate the distribution of peaks in annotation for each experiment
+annot_peaks_list = lapply(names(peak_list), function(peak_name){
+  annotatePeaks(peak_list[[peak_name]], annotation_list, peak_name)
+})
+
+
+# combine a list of data.frames into one data.frame
+annot_peaks_df = dplyr::bind_rows(annot_peaks_list)
+
+
+# plot the distribution of peaks in genomic features
+ggplot(data = annot_peaks_df, 
+       aes(
+           x    = experiment, 
+           y    = frequency, 
+           fill = annotation
+        )) +
+  geom_bar(stat='identity') +
+  scale_fill_brewer(palette='Set2') +
+  theme_bw()+
+  theme(
+    axis.text = element_text(size=18, face='bold'),
+    axis.title = element_text(size=14,face="bold"),
+    plot.title = element_text(hjust = 0.5))  +
+  ggtitle('Peak distribution in\ngenomic regions') +
+  xlab('Experiment') +
+  ylab('Frequency')
+
+motif_hits_df = data.frame(
+  peak_order     = 1:length(ctcf_peaks)
+)
+
+motif_hits_df$contains_motif = motif_hits_df$peak_order %in% hits$seqnames
+
+
+
+motif_hits_df = motif_hits_df[order(-motif_hits_df$peak_order),]
+
+# calculate the percentage of peaks with motif for peaks of descending strength
+motif_hits_df$perc_peaks = with(motif_hits_df, 
+                                cumsum(contains_motif) / max(peak_order))
+motif_hits_df$perc_peaks = round(motif_hits_df$perc_peaks, 2)
+
+# plot the cumulative distribution of motif hit percentages
+ggplot(
+    motif_hits_df, 
+    aes(
+        x = peak_order, 
+        y = perc_peaks
+    )) +
+  geom_line(size=2) +
+  theme_bw() +
+  theme(
+    axis.text = element_text(size=10, face='bold'),
+    axis.title = element_text(size=14,face="bold"),
+    plot.title = element_text(hjust = 0.5)) +
+  xlab('Peak rank') +
+  ylab('Percetage of peaks with motif') +
+  ggtitle('Percentage of CTCF peaks with the CTCF motif')
 
 
