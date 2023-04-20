@@ -1188,6 +1188,123 @@ ggplot(
   ylab('Percetage of peaks with motif') +
   ggtitle('Percentage of CTCF peaks with the CTCF motif')
 
-#
+#Motif localization
+
+# resize the region around peaks to +/- 1kb
+ctcf_peaks_resized = resize(ctcf_peaks, width = 2000, fix='center')
+
+# fetch the sequence
+seq = getSeq(BSgenome.Hsapiens.UCSC.hg38,ctcf_peaks_resized)
+
+# convert the motif matrix to PWM, and scan the peaks
+ctcf_pwm    = PWMatrix(ID = 'CTCF', profileMatrix = ctcf_motif)
+hits = searchSeq(ctcf_pwm, seq, min.score="80%", strand="*")
+hits = as.data.frame(hits)
+
+# set the position relative to the start
+hits$position = hits$start - 1000 
+
+# plot the motif hits around peaks
+ggplot(data=hits, aes(position)) +
+  geom_density(size=2) +
+  theme_bw() +
+  geom_vline(xintercept = 0, linetype=2, color='red', size=2) +
+  xlab('Position around the CTCF peaks') +
+  ylab('Per position percentage\nof motif occurence') +
+  theme(
+    axis.text = element_text(size=10, face='bold'),
+    axis.title = element_text(size=14,face="bold"),
+    plot.title = element_text(hjust = 0.5))
+
+#Peak annotation
+
+# download the annotation
+hub = AnnotationHub()
+gtf = hub[['AH61126']]
+seqlevels(gtf, pruning.mode='coarse') = '21'
+seqlevels(gtf, pruning.mode='coarse') = paste0('chr', seqlevels(gtf))
+
+# create the annotation hierarchy
+annotation_list = GRangesList(
+  tss    = promoters(subset(gtf, type=='gene'), 1000, 1000),
+  exon   = subset(gtf, type=='exon'),
+  intron = subset(gtf, type=='gene')
+)
+
+# function which annotates the location of each peak
+annotatePeaks = function(peaks, annotation_list, name){
+  
+  # ------------------------------------------------ #
+  # 1. getting disjoint regions
+  # collapse touching enriched regions
+  peaks = reduce(peaks)
+  
+  # ------------------------------------------------ #
+  # 2. overlapping peaks and annotation
+  # find overlaps between the peaks and annotation_list
+  result = as.data.frame(findOverlaps(peaks, annotation_list))
+  
+  # ------------------------------------------------ #
+  # 3. annotating peaks
+  # fetch annotation names
+  result$annotation = names(annotation_list)[result$subjectHits]
+  
+  # rank by annotation precedence
+  result = result[order(result$subjectHits),]    
+  
+  # remove overlapping annotations
+  result = subset(result, !duplicated(queryHits))
+  
+  # ------------------------------------------------ #
+  # 4. calculating statistics
+  # count the number of peaks in each annotation category
+  result = group_by(.data = result, annotation)
+  result = summarise(.data = result, counts = length(annotation))
+  
+  # fetch the number of intergenic peaks
+  result = rbind(result, 
+                 data.frame(annotation = 'intergenic', 
+                            counts     = length(peaks) - sum(result$counts)))
+  
+  result$frequency  = with(result, round(counts/sum(counts),2))
+  result$experiment = name
+  
+  return(result)
+}
+
+
+peak_list = list(
+    CTCF     = ctcf_peaks, 
+    H3K36me3 = h3k36_peaks
+)
+
+# calculate the distribution of peaks in annotation for each experiment
+annot_peaks_list = lapply(names(peak_list), function(peak_name){
+  annotatePeaks(peak_list[[peak_name]], annotation_list, peak_name)
+})
+
+
+# combine a list of data.frames into one data.frame
+annot_peaks_df = dplyr::bind_rows(annot_peaks_list)
+
+# plot the distribution of peaks in genomic features
+ggplot(data = annot_peaks_df, 
+       aes(
+           x    = experiment, 
+           y    = frequency, 
+           fill = annotation
+        )) +
+  geom_bar(stat='identity') +
+  scale_fill_brewer(palette='Set2') +
+  theme_bw()+
+  theme(
+    axis.text = element_text(size=18, face='bold'),
+    axis.title = element_text(size=14,face="bold"),
+    plot.title = element_text(hjust = 0.5))  +
+  ggtitle('Peak distribution in\ngenomic regions') +
+  xlab('Experiment') +
+  ylab('Frequency')
+
+
 
 
